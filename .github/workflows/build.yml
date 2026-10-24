@@ -1,0 +1,21 @@
+name: Build macOS app
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Weather Eyes
+        run: ./build.sh
+      - name: Check app bundle
+        run: |
+          test -x 'Weather Eyes.app/Contents/MacOS/WeatherEyes'
+          test -f 'Weather Eyes.app/Contents/Resources/eyes.html'

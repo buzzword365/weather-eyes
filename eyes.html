@@ -1,0 +1,684 @@
+<meta charset="utf-8">
+<title>Weather Eyes</title>
+<style>
+/* Layout: full-bleed canvas &#8212; a real-time local sky with one black head and its two eyes in the middle; a quiet HUD bottom-left. Single dark look by choice. */
+:root{
+  --ink:#050507;
+  --hud:rgba(244,244,240,.9);
+  --hud-dim:rgba(244,244,240,.55);
+  --panel:rgba(10,10,14,.55);
+  --line:rgba(255,255,255,.12);
+  --on:rgba(255,255,255,.18);
+  --font-big:"Bricolage Grotesque", "Arial Black", system-ui, sans-serif;
+  --font-ui:"Sora", ui-rounded, "SF Pro Rounded", system-ui, sans-serif;
+  color-scheme:dark;
+}
+html,body{height:100%;margin:0;background:var(--ink);overflow:hidden}
+canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
+#hud{padding:10px 14px;border-radius:14px;background:rgba(6,8,14,.34);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);position:fixed;left:calc(18px + env(safe-area-inset-left,0px));bottom:calc(16px + env(safe-area-inset-bottom,0px));display:flex;flex-direction:column;gap:3px;font:500 12.5px/1.35 var(--font-ui);color:var(--hud);pointer-events:none;text-shadow:0 1px 8px rgba(0,0,0,.75)}
+#roll{display:flex;align-items:center;gap:8px;font-weight:700;font-size:14px}
+#swatch{width:14px;height:14px;border-radius:50%;flex:none;box-shadow:0 0 0 1px rgba(255,255,255,.25)}
+#odds{font-weight:500;color:var(--hud-dim);font-variant-numeric:tabular-nums}
+#temp{position:fixed;top:50%;transform:translateY(-50%);color:#fff;pointer-events:none;text-shadow:0 2px 24px rgba(0,0,0,.35)}
+#temp{left:max(4vw, calc(16px + env(safe-area-inset-left,0px)));display:flex;flex-direction:column;gap:.4em}
+#temp .row{display:flex;align-items:center;gap:.18em;font:800 min(15vh,10vw)/.9 var(--font-big);letter-spacing:-.04em;font-variant-numeric:tabular-nums}
+#wicon{display:block;width:.62em;height:.62em;flex:none;filter:drop-shadow(0 2px 10px rgba(0,0,0,.25))}
+#wicon svg{width:100%;height:100%;display:block}
+#cond{font:600 min(2.4vh,1.6vw)/1.2 var(--font-ui);letter-spacing:.14em;text-transform:uppercase;opacity:.85;padding-left:.2em}
+#reroll{color:var(--hud)!important}
+body.app </style>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=Bricolage+Grotesque:opsz,wght@12..96,800&display=swap">
+
+<canvas id="c"></canvas>
+<div id="temp" aria-live="polite">
+  <div class="row"><span id="wicon"></span><span id="deg">--&#176;</span></div>
+  <span id="cond">Checking the sky</span>
+</div>
+<div id="hud">
+  <span id="roll"><span id="swatch"></span><span id="cwname">&#8230;</span><span id="odds"></span></span>
+</div>
+
+<script src="config.js"></script>
+<script>
+(()=>{
+const cv=document.getElementById('c'),ctx=cv.getContext('2d');
+const Q=new URLSearchParams(location.search);
+const APP=Q.has('app')||!!window.__EYES_APP;
+if(APP)document.body.classList.add('app');
+const REDUCE=matchMedia('(prefers-reduced-motion: reduce)').matches;
+// The macOS app supplies its saved location before this script runs.
+// Browser users may use URL coordinates or an untracked config.js instead.
+const validPlace=p=>p&&p.lat!=null&&p.lon!=null
+  &&Number.isFinite(Number(p.lat))&&Number.isFinite(Number(p.lon))
+  &&Number(p.lat)>=-90&&Number(p.lat)<=90&&Number(p.lon)>=-180&&Number(p.lon)<=180
+  ?{lat:Number(p.lat),lon:Number(p.lon)}:null;
+const CFG=window.EYES_CONFIG||{};
+let PLACE=validPlace(window.__EYES_LOCATION)
+  ||validPlace(Q.has('lat')&&Q.has('lon')?{lat:Q.get('lat'),lon:Q.get('lon')}:null)
+  ||validPlace(CFG);
+
+const TAU=Math.PI*2,clamp=(v,a=0,b=1)=>v<a?a:v>b?b:v,lerp=(a,b,t)=>a+(b-a)*t;
+const rnd=(a=1,b)=>b===undefined?Math.random()*a:a+Math.random()*(b-a);
+const pick=a=>a[Math.random()*a.length|0];
+const sstep=(a,b,x)=>{const t=clamp((x-a)/(b-a));return t*t*(3-2*t)};
+const hex=h=>[parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
+const rgba=(c,a=1)=>`rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
+const mix=(a,b,t)=>[lerp(a[0],b[0],t),lerp(a[1],b[1],t),lerp(a[2],b[2],t)];
+const mul=(c,k)=>[c[0]*k,c[1]*k,c[2]*k];
+const hsl=(h,s,l)=>{s/=100;l/=100;const k=n=>(n+h/30)%12,a=s*Math.min(l,1-l),f=n=>l-a*Math.max(-1,Math.min(k(n)-3,9-k(n),1));return[f(0)*255,f(8)*255,f(4)*255]};
+
+/* =============== colourways =============== */
+const COMMON=[
+ ['Lemon Ice','#f2ec62','#2f7de1'],['Bone','#dcd8cc','#c8321e'],['Tangerine','#ff7a2f','#3a1050'],
+ ['Moss','#4f7a3a','#f0a030'],['Grape Soda','#8a2be2','#f6e94a'],['Pool','#2a6df0','#e8f6ff'],
+ ['Bubblegum','#ff8fb8','#24485a'],['Olive','#8a8a2a','#2a2a0c'],['Deep Navy','#1d3c9a','#7cc0ff'],
+ ['Cherry','#d42a48','#62d874'],['Teal','#14b8a6','#06302c'],['Peach','#ffb88a','#6b2a0f'],
+ ['Lilac','#c9a7ff','#3b136b'],['Marmalade','#f4a234','#6a5a1c'],['Chalk','#f2f2ee','#151515'],
+ ['Lime','#9be22d','#b0127a'],['Sky','#7cc6ff','#ff5a36'],['Sand','#e0c68a','#3f6e3a'],
+ ['Ink','#3a44a8','#ff3d7f'],['Clay','#c47a55','#1f3b4d']];
+const RARE=[
+ ['Hazard','#ffe600','#101010'],['Laser','#ff2bd6','#00f0ff'],['Toxic','#39ff14','#5a00b3'],
+ ['Ember','#ff4500','#ffe08a'],['Glacier','#bff6ff','#0077ff'],['Reef','#ff6f61','#00b3a6'],
+ ['Static','#ffffff','#ff0033'],['Mint Chip','#b5f5d0','#4a2b1a']];
+const EPIC=[
+ ['Odd Pair',['#f2ec62','#2f7de1'],['#2f7de1','#f2ec62']],
+ ['Two Moods',['#ff8fb8','#24485a'],['#14b8a6','#06302c']],
+ ['Mismatch',['#ff7a2f','#3a1050'],['#9be22d','#b0127a']],
+ ['Day & Night',['#f2f2ee','#151515'],['#2a2a30','#f2f2ee']]];
+const LEGEND=[['Prism'],['Void'],['Galaxy']];
+const TIERS=[['common',.70,COMMON],['rare',.22,RARE],['epic',.07,EPIC],['legendary',.01,LEGEND]];
+const SHAPES=[['round',30],['slit',24],['pin',14],['wide',14],['ring',9],['diamond',9]];
+function rollShape(){let r=rnd(100);for(const[s,w]of SHAPES)if((r-=w)<0)return s;return'round'}
+function rollColourway(){
+  let r=Math.random(),tier=TIERS[0];for(const t of TIERS)if((r-=t[1])<0){tier=t;break}
+  const e=pick(tier[2]);
+  const cw={name:e[0],tier:tier[0],odds:tier[1]/tier[2].length*100,shape:rollShape(),special:null};
+  if(tier[0]==='epic'){cw.sL=hex(e[1][0]);cw.pL=hex(e[1][1]);cw.sR=hex(e[2][0]);cw.pR=hex(e[2][1])}
+  else if(tier[0]==='legendary'){cw.special=e[0].toLowerCase();
+    if(cw.special==='void'){cw.sL=cw.sR=[16,16,20];cw.pL=cw.pR=[255,255,255]}
+    else if(cw.special==='galaxy'){cw.sL=cw.sR=[40,18,84];cw.pL=cw.pR=[255,236,150]}
+    else{cw.sL=cw.sR=[255,90,90];cw.pL=cw.pR=[24,24,34]}}
+  else{cw.sL=cw.sR=hex(e[1]);cw.pL=cw.pR=hex(e[2])}
+  return cw;
+}
+const fmtOdds=o=>o>=1?o.toFixed(1)+'%':o.toFixed(2)+'%';
+
+/* =============== expressions (how the eyes act) =============== */
+const ACT={
+ sun:   {open:.92,tilt:0,   pupil:.75,follow:.14,blink:4.5,shiver:0},
+ clouds:{open:.88,tilt:-.05,pupil:1,  follow:.09,blink:5,  shiver:0},
+ rain:  {open:.88,tilt:-.4, pupil:1.1,follow:.09,blink:3.6,shiver:0},
+ storm: {open:.98,tilt:.65, pupil:.85,follow:.2, blink:6,  shiver:.15},
+ snow:  {open:.88,tilt:-.12,pupil:1,  follow:.1, blink:3,  shiver:.8},
+ fog:   {open:.76,tilt:-.08,pupil:1.15,follow:.06,blink:4.5,shiver:0},
+ night: {open:1,  tilt:0,   pupil:1.3,follow:.1, blink:5,  shiver:0}
+};
+const WMO={0:'Clear',1:'Mostly clear',2:'Partly cloudy',3:'Overcast',45:'Fog',48:'Freezing fog',51:'Light drizzle',53:'Drizzle',55:'Heavy drizzle',56:'Freezing drizzle',57:'Freezing drizzle',61:'Light rain',63:'Rain',65:'Heavy rain',66:'Freezing rain',67:'Freezing rain',71:'Light snow',73:'Snow',75:'Heavy snow',77:'Snow grains',80:'Light showers',81:'Showers',82:'Heavy showers',85:'Snow showers',86:'Heavy snow showers',95:'Thunderstorm',96:'Thunderstorm, hail',99:'Thunderstorm, hail'};
+function codeMood(c,day){
+  if(c>=95)return'storm';if((c>=71&&c<=77)||c===85||c===86)return'snow';
+  if((c>=51&&c<=67)||(c>=80&&c<=82))return'rain';if(c===45||c===48)return'fog';
+  if(c===3)return'clouds';return day?'sun':'night';
+}
+const RAIN_I={51:.25,53:.35,55:.45,56:.3,57:.4,61:.45,63:.75,65:1.15,66:.5,67:.9,80:.55,81:.9,82:1.35,95:1.3,96:1.5,99:1.6};
+const SNOW_I={71:.45,73:.8,75:1.2,77:.35,85:.6,86:1.1};
+// Preview stand-ins (the live page uses the real readings)
+const SAMPLE={
+ sun:{code:0,cloud:6,precip:0,snowfall:0,wind:12,windDir:300,temp:24,vis:40000,elev:.6},
+ clouds:{code:3,cloud:96,precip:0,snowfall:0,wind:18,windDir:220,temp:15,vis:24000,elev:.5},
+ rain:{code:63,cloud:100,precip:3,snowfall:0,wind:20,windDir:250,temp:12,vis:8000,elev:.45},
+ storm:{code:95,cloud:100,precip:7,snowfall:0,wind:42,windDir:290,temp:18,vis:5000,elev:.35},
+ snow:{code:73,cloud:98,precip:0,snowfall:1.2,wind:14,windDir:200,temp:-1,vis:3000,elev:.4},
+ fog:{code:45,cloud:70,precip:0,snowfall:0,wind:4,windDir:180,temp:8,vis:250,elev:.25},
+ night:{code:0,cloud:8,precip:0,snowfall:0,wind:8,windDir:330,temp:11,vis:40000,elev:-1}
+};
+
+/* =============== state =============== */
+let W=0,H=0,DPR=1,S=0;
+const mouse={x:innerWidth/2,y:innerHeight*.42,last:performance.now(),speed:0};
+let live=null; // real reading
+let wx=null;   // what is shown now
+const env={sky:[[0,0,0],[0,0,0],[0,0,0]],cloud:0,rain:0,snow:0,fog:0,storm:0,wind:0,windX:0,elev:-1,sunX:0,sunY:0,moon:0,stars:0,drizzle:0};
+const envT={...env,sky:env.sky.map(c=>c.slice())};
+const act={...ACT.night},actT={...ACT.night};
+let startle=0,squint=0,sleep=0,dizzy=0,dizzyMeter=0,flash=0,flashX=.5,nextBolt=5,bolt=null,shake=0,thunder=[],snowPile=0;
+let wander={x:0,y:0,next:0},sunNear=0;
+const head={x:0,y:0,R:0,yaw:0,pitch:0,lx:0,ly:0,blinkT:-1,nextBlink:2,pupil:1,cw:null,pop:0};
+
+const DAY=24*3600e3;
+function savedRoll(){try{const s=JSON.parse(localStorage.getItem('eyes.cw')||'null');if(s&&Date.now()-s.at<DAY)return s.cw}catch(e){}return null}
+function reroll(){head.cw=rollColourway();head.pop=1;head.blinkT=0;startle=.7;try{localStorage.setItem('eyes.cw',JSON.stringify({cw:head.cw,at:Date.now()}))}catch(e){}renderHud()}
+
+/* =============== periodic value noise for clouds & fog =============== */
+function makeNoise(seed){
+  let s=seed>>>0;const r=()=>(s=(s*1664525+1013904223)>>>0)/4294967296;
+  const v=new Float32Array(256),p=new Uint8Array(512);
+  for(let i=0;i<256;i++){v[i]=r();p[i]=i}
+  for(let i=255;i>0;i--){const j=r()*(i+1)|0;[p[i],p[j]]=[p[j],p[i]]}
+  for(let i=0;i<256;i++)p[i+256]=p[i];
+  const h=(x,y)=>v[p[(x&255)+p[y&255]]];
+  return(x,y,per)=>{const xi=Math.floor(x),yi=Math.floor(y),xf=x-xi,yf=y-yi,u=xf*xf*(3-2*xf),w=yf*yf*(3-2*yf);
+    const x0=((xi%per)+per)%per,x1=(x0+1)%per,a=h(x0,yi),b=h(x1,yi),c=h(x0,yi+1),d=h(x1,yi+1);
+    return a+(b-a)*u+(c-a)*w+(a-b-c+d)*u*w};
+}
+function fbmField(seed,w,h,per,oct,fy){
+  const n=makeNoise(seed),f=new Float32Array(w*h);
+  for(let y=0;y<h;y++)for(let x=0;x<w;x++){
+    let sum=0,amp=.5,fr=1,norm=0;
+    for(let o=0;o<oct;o++){sum+=amp*n(x/w*per*fr,y/h*per*fy*fr,per*fr);norm+=amp;amp*=.5;fr*=2}
+    f[y*w+x]=sum/norm;
+  }
+  return f;
+}
+const CW=384,CH=192;
+const LAYERS=[
+  {field:fbmField(7,CW,CH,5,5,.55),cv:document.createElement('canvas'),speed:.6,top:-.02,hgt:.72,falloff:.62,alpha:.95},
+  {field:fbmField(23,CW,CH,3,5,.5),cv:document.createElement('canvas'),speed:1,top:.08,hgt:.68,falloff:.7,alpha:1}
+];
+const FOGF={field:fbmField(41,CW,CH,3,4,.4),cv:document.createElement('canvas')};
+LAYERS.forEach(l=>{l.cv.width=CW;l.cv.height=CH});FOGF.cv.width=CW;FOGF.cv.height=CH;
+let cloudKey='';
+function paintClouds(){
+  const cover=env.cloud,light=cloudLight(),dark=cloudDark();
+  const key=[cover,light,dark].flat().map(v=>Math.round(v*20)).join(',');
+  if(key===cloudKey)return;cloudKey=key;
+  const t0=.74-cover*.62;
+  LAYERS.forEach((L,li)=>{
+    const c=L.cv.getContext('2d'),img=c.createImageData(CW,CH),d=img.data,f=L.field;
+    for(let y=0;y<CH;y++){
+      const vy=y/CH,fall=(1-sstep(L.falloff-.2,1,vy))*sstep(0,.12,vy);
+      for(let x=0;x<CW;x++){
+        const i=y*CW+x,n=f[i],up=f[(y>3?y-3:0)*CW+x];
+        let a=sstep(t0,t0+.28,n)*fall;
+        if(cover>.8)a=Math.max(a,(cover-.8)*3.6*fall*(.75+.25*n));
+        const lit=clamp(.55+(n-up)*6+(1-vy)*.25-(li?.12:0));
+        const col=mix(dark,light,lit);
+        d[i*4]=col[0];d[i*4+1]=col[1];d[i*4+2]=col[2];d[i*4+3]=clamp(a)*255;
+      }
+    }
+    c.putImageData(img,0,0);
+    c.filter='blur(1.5px)';c.globalCompositeOperation='copy';c.drawImage(L.cv,0,0);c.filter='none';c.globalCompositeOperation='source-over';
+  });
+  // fog
+  const c=FOGF.cv.getContext('2d'),img=c.createImageData(CW,CH),d=img.data,fc=mix(cloudLight(),env.sky[2],.5);
+  for(let i=0;i<CW*CH;i++){const n=FOGF.field[i];d[i*4]=fc[0];d[i*4+1]=fc[1];d[i*4+2]=fc[2];const vy=(i/CW|0)/CH;d[i*4+3]=sstep(.25,.75,n)*sstep(0,.3,vy)*(1-sstep(.7,1,vy))*255}
+  c.putImageData(img,0,0);
+}
+function cloudLight(){
+  const e=env.elev,day=sstep(-.05,.3,e),gold=sstep(-.12,.05,e)*(1-sstep(.05,.3,e));
+  let c=mix([60,66,86],[250,250,252],day);c=mix(c,[255,186,140],gold*.8);
+  c=mix(c,mul(c,.62),clamp(env.rain*.6+env.storm*.5+env.snow*.1));
+  return c;
+}
+function cloudDark(){
+  const e=env.elev,day=sstep(-.05,.3,e);
+  let c=mix([14,16,26],[128,134,148],day);
+  c=mix(c,mul(c,.45),clamp(env.storm*.9+env.rain*.35));
+  return c;
+}
+
+/* =============== sky =============== */
+function skyFor(elev,cover,rain,storm,fog){
+  const N=[[4,6,16],[9,13,30],[20,26,48]],T=[[16,22,56],[70,52,96],[214,118,82]],G=[[52,86,160],[186,140,130],[255,176,104]],D=[[38,104,196],[104,162,222],[184,212,236]];
+  const seg=(a,b,t)=>a.map((c,i)=>mix(c,b[i],t));
+  let s=elev<-.15?seg(N,T,sstep(-.4,-.15,elev)):elev<0?seg(T,G,sstep(-.15,0,elev)):elev<.18?seg(G,D,sstep(0,.18,elev)):D;
+  if(elev<-.4)s=N;
+  const grey=s.map(c=>{const l=(c[0]*.3+c[1]*.59+c[2]*.11);return[l*.92,l*.96,l*1.05]});
+  s=s.map((c,i)=>mix(c,grey[i],clamp(cover*.85+fog*.6)));
+  const dim=1-clamp(rain*.28+storm*.5);
+  s=s.map(c=>mul(c,dim));
+  return s;
+}
+function moonPhase(d=new Date()){const syn=29.530588853,ref=Date.UTC(2000,0,6,18,14);return(((d-ref)/864e5)%syn+syn)%syn/syn}
+
+function sunElevation(now){
+  if(!live||!live.sunrise)return null;
+  const sr=live.sunrise,ss=live.sunset,p=(now-sr)/(ss-sr);
+  if(p>=0&&p<=1)return{elev:Math.sin(Math.PI*p)*.95+.02,p};
+  const mins=p<0?(sr-now)/6e4:(now-ss)/6e4;
+  return{elev:-clamp(mins/110),p:p<0?0:1};
+}
+
+function buildWx(){
+  if(!live){
+    const key=isDaytime()?'sun':'night';
+    const s=SAMPLE[key];
+    wx={...s,isDay:s.elev>0,mood:key,preview:true};
+  }else{
+    const se=sunElevation(Date.now())||{elev:live.isDay?.5:-1,p:.5};
+    wx={...live,elev:se.elev,p:se.p,mood:codeMood(live.code,live.isDay),preview:false};
+  }
+  const c=wx.code;
+  envT.rain=Math.max(RAIN_I[c]||0,clamp((wx.precip||0)/5,0,1.6)*(SNOW_I[c]?0:1));
+  envT.drizzle=c>=51&&c<=57?1:0;
+  envT.snow=Math.max(SNOW_I[c]||0,clamp((wx.snowfall||0)/1.5,0,1.4));
+  envT.storm=c>=95?1:0;
+  envT.cloud=clamp(Math.max(wx.cloud/100,envT.rain>0||envT.snow>0?.88:0,c===3?.95:0));
+  envT.fog=Math.max(c===45||c===48?1:0,wx.vis!=null?clamp((3000-wx.vis)/2700):0);
+  envT.wind=clamp(wx.wind/60);
+  envT.windX=-Math.sin((wx.windDir||270)*Math.PI/180)*clamp(wx.wind/45,0,1.3);
+  envT.elev=wx.elev;
+  envT.stars=sstep(-.12,-.3,wx.elev)*(1-clamp(envT.cloud*1.05));
+  envT.moon=wx.elev<-.05?1:0;
+  envT.sky=skyFor(wx.elev,envT.cloud,envT.rain,envT.storm,envT.fog);
+  const a=ACT[wx.mood];Object.assign(actT,a);
+  if(wx.elev<0&&wx.mood!=='night')actT.pupil*=1.15;
+  if(wx.temp!=null&&wx.temp<8)actT.shiver=Math.max(actT.shiver,clamp((8-wx.temp)/8)*.6);
+  actT.open*=1-.08*clamp((wx.wind-35)/30);
+  renderHud();
+}
+const isDaytime=()=>{const h=new Date().getHours();return h>=6&&h<19};
+
+function stepEnv(dt){
+  const k=1-Math.exp(-dt*.6);
+  for(const key of['cloud','rain','snow','fog','storm','wind','windX','elev','stars','moon','drizzle'])env[key]=lerp(env[key],envT[key],k);
+  env.sky=env.sky.map((c,i)=>mix(c,envT.sky[i],k));
+  const ka=1-Math.exp(-dt*1.4);
+  for(const key in actT)act[key]=lerp(act[key],actT[key],ka);
+}
+
+/* =============== live data =============== */
+async function getJSON(u){const r=await fetch(u,{cache:'no-store'});if(!r.ok)throw new Error(r.status);return r.json()}
+let weatherRequestId=0;
+let weatherStatus="loading";
+async function locate(){
+  if(PLACE)return PLACE;
+  try{
+    const g=await getJSON('https://ipapi.co/json/');
+    const found=validPlace({lat:g.latitude,lon:g.longitude});
+    if(found)return PLACE=found;
+  }catch(e){}
+  const g=await getJSON('https://get.geojs.io/v1/ip/geo.json');
+  const found=validPlace({lat:g.latitude,lon:g.longitude});
+  if(!found)throw new Error('Location unavailable');
+  return PLACE=found;
+}
+async function loadWeather(){
+  const id=++weatherRequestId;
+  weatherStatus="loading";
+  renderHud();
+  try{
+    const place=await locate();
+    if(id!==weatherRequestId)return;
+    const u=`https://api.open-meteo.com/v1/forecast?latitude=${place.lat}&longitude=${place.lon}&current=temperature_2m,weather_code,is_day,cloud_cover,precipitation,snowfall,wind_speed_10m,wind_direction_10m,visibility&daily=sunrise,sunset&timezone=auto&forecast_days=1&timeformat=unixtime`;
+    const w=await getJSON(u);
+    if(id!==weatherRequestId)return;
+    const c=w.current;
+    live={code:c.weather_code,isDay:!!c.is_day,temp:Math.round(c.temperature_2m),cloud:c.cloud_cover??50,precip:c.precipitation||0,snowfall:c.snowfall||0,
+      wind:Math.round(c.wind_speed_10m||0),windDir:c.wind_direction_10m||0,vis:c.visibility,
+      sunrise:w.daily&&w.daily.sunrise?w.daily.sunrise[0]*1000:null,
+      sunset:w.daily&&w.daily.sunset?w.daily.sunset[0]*1000:null};
+    weatherStatus="ready";
+  }catch(e){
+    if(id!==weatherRequestId)return;
+    live=null;
+    weatherStatus="error";
+  }
+  buildWx();
+}
+function setLocation(place){
+  PLACE=validPlace(place);
+  live=null;
+  weatherStatus="loading";
+  buildWx();
+  loadWeather();
+}
+function weatherIcon(w){
+  const c=w.code,night=w.elev<-.05,y='#ffd23f',cl='#f2f4f8',dk='#c9ced8',b='#7cc0ff';
+  const sun=`<circle cx="32" cy="32" r="14" fill="${y}"/>`;
+  const moon=`<path d="M38 10a22 22 0 1 0 16 34a17 17 0 0 1-16-34z" fill="#eef0f6"/>`;
+  const cloud=(f,dy=0)=>`<path d="M18 ${44+dy}h28a10 10 0 0 0 0-20a14 14 0 0 0-26 3a9 9 0 0 0-2 17z" fill="${f}"/>`;
+  const drops=`<g stroke="${b}" stroke-width="4" stroke-linecap="round"><path d="M22 50l-3 8M33 50l-3 8M44 50l-3 8"/></g>`;
+  const flakes=`<g fill="#fff"><circle cx="22" cy="54" r="3"/><circle cx="33" cy="58" r="3"/><circle cx="44" cy="54" r="3"/></g>`;
+  const bolt=`<path d="M34 42l-8 12h7l-4 10l11-14h-7l4-8z" fill="${y}"/>`;
+  const fog=`<g stroke="${cl}" stroke-width="4" stroke-linecap="round"><path d="M12 26h40M8 36h46M14 46h36"/></g>`;
+  let svg;
+  if(c>=95)svg=cloud(dk,-6)+bolt;
+  else if((c>=71&&c<=77)||c===85||c===86)svg=cloud(cl,-6)+flakes;
+  else if((c>=51&&c<=67)||(c>=80&&c<=82))svg=cloud(dk,-6)+drops;
+  else if(c===45||c===48)svg=fog;
+  else if(c===3)svg=cloud(cl);
+  else if(c===2)svg=`<g transform="translate(8 -8) scale(.8)">${night?moon:sun}</g>`+cloud(cl,4);
+  else svg=night?moon:sun;
+  return`<svg viewBox="0 0 64 64" aria-hidden="true">${svg}</svg>`;
+}
+function compass(d){return['N','NE','E','SE','S','SW','W','NW'][Math.round(d/45)%8]}
+function renderHud(){
+  const cw=head.cw;
+  if(cw){document.getElementById('cwname').textContent=cw.name+(cw.shape!=='round'?' \u00b7 '+cw.shape:'');
+    document.getElementById('odds').textContent=cw.tier+' \u00b7 '+fmtOdds(cw.odds)+' chance';
+    document.getElementById('swatch').style.background=cw.special==='prism'?'conic-gradient(red,yellow,lime,cyan,blue,magenta,red)':`linear-gradient(90deg,${rgba(cw.sL)} 50%,${rgba(cw.pL)} 50%)`}
+  if(!wx)return;
+  if(!live){
+    document.getElementById('deg').textContent='--\u00b0';
+    document.getElementById('cond').textContent=weatherStatus==='error'?'Weather unavailable':'Loading real weather\u2026';
+    document.getElementById('wicon').innerHTML='';
+    return;
+  }
+  document.getElementById('deg').textContent=(wx.temp!=null?wx.temp:'--')+'\u00b0';
+  let desc=WMO[wx.code]||'';if(wx.elev<-.05&&wx.code<=1)desc='Clear night';
+  if(wx.wind>=30)desc+=' \u00b7 windy';
+  document.getElementById('cond').textContent=desc;
+  document.getElementById('wicon').innerHTML=weatherIcon(wx);
+}
+
+/* =============== input bridge =============== */
+function setCursor(x,y){
+  const now=performance.now(),dt=Math.max(1,now-mouse.last),d=Math.hypot(x-mouse.x,y-mouse.y);
+  if(d<.5)return;
+  if((now-mouse.last)/1000>18||sleep>.3){startle=1;sleep=0}
+  mouse.speed=lerp(mouse.speed,d/dt*1000,.3);mouse.x=x;mouse.y=y;mouse.last=now;
+}
+function poke(){squint=1;head.blinkT=0}
+addEventListener('mousemove',e=>setCursor(e.clientX,e.clientY));
+addEventListener('touchmove',e=>{const t=e.touches[0];setCursor(t.clientX,t.clientY)},{passive:true});
+addEventListener('pointerdown',e=>{setCursor(e.clientX,e.clientY);poke()});
+window.eyes={cursor:setCursor,click:poke,setLocation,reroll,refresh:()=>loadWeather()};
+
+/* =============== resize =============== */
+function resize(){
+  W=innerWidth;H=innerHeight;DPR=Math.min(devicePixelRatio||1,2);
+  if(W*H*DPR*DPR>9e6)DPR=Math.max(1,Math.sqrt(9e6/(W*H)));
+  cv.width=Math.round(W*DPR);cv.height=Math.round(H*DPR);ctx.setTransform(DPR,0,0,DPR,0,0);
+  S=Math.min(W,H);
+  stars=Array.from({length:Math.round(420*W*H/1.4e6)},()=>({x:rnd(W),y:rnd(H*.9),r:Math.pow(Math.random(),3)*1.6+.35,p:rnd(TAU),s:rnd(.5,2),c:pick([[255,255,255],[210,224,255],[255,236,214]])}));
+}
+let stars=[],rain=[],snow=[],splashes=[],beads=[],zzz=[],shooting=null;
+const galaxy=Array.from({length:44},()=>({u:rnd(-1,1),w:rnd(-1,1),r:rnd(.006,.018),p:rnd(TAU)}));
+const blob=document.createElement('canvas');blob.width=blob.height=64;
+{const b=blob.getContext('2d'),g=b.createRadialGradient(32,32,0,32,32,32);g.addColorStop(0,'rgba(255,255,255,1)');g.addColorStop(.5,'rgba(255,255,255,.55)');g.addColorStop(1,'rgba(255,255,255,0)');b.fillStyle=g;b.fillRect(0,0,64,64)}
+const COUNT=b=>Math.round(b*(W*H/1.4e6)*(REDUCE?.4:1));
+
+/* =============== scene layers =============== */
+function sunPos(){const p=wx&&wx.p!=null?wx.p:.62;return{x:W*(.06+.88*p),y:H*(.86-.7*Math.sin(Math.PI*clamp(p))),r:S*.032}}
+function drawSky(){
+  const g=ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,rgba(env.sky[0]));g.addColorStop(.58,rgba(env.sky[1]));g.addColorStop(1,rgba(env.sky[2]));
+  ctx.fillStyle=g;ctx.fillRect(-20,-20,W+40,H+40);
+}
+function drawStars(t,dt){
+  const a=env.stars;if(a<.01)return;
+  for(const s of stars){ctx.globalAlpha=a*(.45+.55*(.5+.5*Math.sin(t*s.s+s.p)))*clamp(1-s.y/H*1.1+.3);ctx.fillStyle=rgba(s.c);ctx.fillRect(s.x,s.y,s.r,s.r)}
+  ctx.globalAlpha=1;
+  if(!shooting&&Math.random()<dt*.03*a&&!REDUCE)shooting={x:rnd(W*.1,W*.7),y:rnd(H*.05,H*.35),vx:rnd(600,900),vy:rnd(180,280),life:1};
+  if(shooting){const s=shooting;s.x+=s.vx*dt;s.y+=s.vy*dt;s.life-=dt*1.6;
+    const g=ctx.createLinearGradient(s.x,s.y,s.x-s.vx*.12,s.y-s.vy*.12);g.addColorStop(0,`rgba(255,255,255,${clamp(s.life)*a})`);g.addColorStop(1,'rgba(255,255,255,0)');
+    ctx.strokeStyle=g;ctx.lineWidth=1.4;ctx.beginPath();ctx.moveTo(s.x,s.y);ctx.lineTo(s.x-s.vx*.12,s.y-s.vy*.12);ctx.stroke();if(s.life<=0)shooting=null}
+}
+function drawSun(){
+  if(env.elev<-.08)return;
+  const s=sunPos(),vis=clamp(1-env.cloud*.92)*sstep(-.08,.02,env.elev),low=1-sstep(0,.3,env.elev);
+  const core=mix([255,252,240],[255,170,90],low);
+  const g=ctx.createRadialGradient(s.x,s.y,0,s.x,s.y,s.r*14);
+  g.addColorStop(0,rgba(core,.55*vis+.08*(1-vis)*sstep(-.05,.2,env.elev)));g.addColorStop(.12,rgba(core,.22*vis));g.addColorStop(1,rgba(core,0));
+  ctx.fillStyle=g;ctx.fillRect(s.x-s.r*14,s.y-s.r*14,s.r*28,s.r*28);
+  if(vis>.02){ctx.fillStyle=rgba(core,vis);ctx.beginPath();ctx.arc(s.x,s.y,s.r,0,TAU);ctx.fill()}
+}
+function drawMoon(){
+  if(env.moon<.02)return;
+  const ph=moonPhase(),r=S*.026,x=W*.78,y=H*.2,vis=env.moon*clamp(1-env.cloud*.9);
+  const g=ctx.createRadialGradient(x,y,r,x,y,r*9);g.addColorStop(0,`rgba(200,214,255,${.16*env.moon*(1-env.cloud*.5)})`);g.addColorStop(1,'rgba(200,214,255,0)');
+  ctx.fillStyle=g;ctx.fillRect(x-r*9,y-r*9,r*18,r*18);
+  if(vis<.02)return;
+  ctx.save();ctx.globalAlpha=vis;
+  ctx.fillStyle='rgba(40,44,60,.9)';ctx.beginPath();ctx.arc(x,y,r,0,TAU);ctx.fill();
+  // lit part: a waxing moon is lit on the right in the northern hemisphere and on the left in the southern
+  const south=PLACE?PLACE.lat<0:false;
+  const waxing=ph<.5,k=Math.cos(ph*TAU),side=(waxing?-1:1)*(south?-1:1);
+  ctx.fillStyle='#eef0f6';ctx.beginPath();
+  ctx.arc(x,y,r,-Math.PI/2,Math.PI/2,side>0);
+  ctx.ellipse(x,y,Math.abs(k)*r,r,0,Math.PI/2,-Math.PI/2,(k>0)!==(side>0));
+  ctx.fill();ctx.restore();
+}
+function drawCloudLayer(L,t,i){
+  if(env.cloud<.02)return;
+  const dh=H*L.hgt,dw=dh*(CW/CH)*1.7,y=H*L.top;
+  const off=((t*(6+40*Math.abs(env.windX))*L.speed*Math.sign(env.windX||1))%dw+dw)%dw;
+  ctx.globalAlpha=L.alpha;
+  for(let x=off-dw;x<W;x+=dw)ctx.drawImage(L.cv,x,y,dw+1,dh);
+  ctx.globalAlpha=1;
+}
+function drawFog(t){
+  const a=env.fog;if(a<.02)return;
+  const g=ctx.createLinearGradient(0,H*.2,0,H);const fc=mix(cloudLight(),env.sky[2],.5);
+  g.addColorStop(0,rgba(fc,0));g.addColorStop(1,rgba(fc,.6*a));ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+  ctx.fillStyle=rgba(fc,.16*a);ctx.fillRect(0,0,W,H);
+  const dh=H*.9,dw=dh*2.4;
+  [[.15,.5,.45],[.3,-.35,.35]].forEach(([top,sp,al])=>{const off=((t*14*sp)%dw+dw)%dw;ctx.globalAlpha=al*a;for(let x=off-dw;x<W;x+=dw)ctx.drawImage(FOGF.cv,x,H*top,dw+1,dh)});
+  ctx.globalAlpha=1;
+}
+function drawRain(dt,front){
+  const I=env.rain;if(I<.01&&!rain.length)return;
+  if(!front){
+    const want=COUNT(520*I);
+    while(rain.length<want)rain.push({x:rnd(-200,W+200),y:rnd(-H,H),z:Math.pow(Math.random(),1.6)});
+    if(rain.length>want)rain.length=want;
+  }
+  const dz=env.drizzle,slant=env.windX*.55;
+  ctx.lineCap='round';
+  for(const layer of front?[2]:[0,1]){
+    const zlo=layer===0?0:layer===1?.45:.82,zhi=layer===0?.45:layer===1?.82:1.01;
+    const sp=lerp(700,1500,(zlo+zhi)/2)*(dz?.55:1),len=lerp(10,34,(zlo+zhi)/2)*(dz?.4:1);
+    ctx.strokeStyle=`rgba(${dz?210:196},${dz?216:210},${225},${(layer===0?.18:layer===1?.28:.36)*(1+flash)})`;
+    ctx.lineWidth=layer===2?1.6:layer===1?1.1:.8;ctx.beginPath();
+    for(const d of rain){if(d.z<zlo||d.z>=zhi)continue;
+      d.y+=sp*dt;d.x+=sp*dt*slant;
+      if(d.y>H+40){if(layer>0&&Math.random()<.3&&splashes.length<160)splashes.push({x:d.x,y:H-rnd(2,16),life:1,s:layer});
+        d.y=rnd(-200,-20);d.x=rnd(-200,W+200)}
+      ctx.moveTo(d.x,d.y);ctx.lineTo(d.x-slant*len,d.y-len)}
+    ctx.stroke();
+  }
+  if(!front){
+    // drops hitting the top of the head
+    if(I>.05&&Math.random()<dt*28*I){const a=-Math.PI/2+rnd(-1.1,1.1);splashes.push({x:head.x+Math.cos(a)*head.R,y:head.y+Math.sin(a)*head.R,life:1,s:1,head:true,a})}
+    for(let i=splashes.length-1;i>=0;i--){const s=splashes[i];s.life-=dt*4;if(s.life<=0){splashes.splice(i,1);continue}
+      ctx.strokeStyle=`rgba(205,220,240,${s.life*.5})`;ctx.lineWidth=1;const r=(1-s.life)*(s.head?7:9)+1.5;
+      ctx.beginPath();ctx.ellipse(s.x,s.y-(s.head?(1-s.life)*4:0),r,r*.35,0,Math.PI,TAU);ctx.stroke()}
+  }
+}
+function drawBeads(dt){
+  const I=env.rain;if(I<.05&&!beads.length)return;
+  if(Math.random()<dt*14*I&&beads.length<COUNT(70)*I+4)beads.push({x:rnd(W),y:rnd(H),r:rnd(1.5,4.5),life:1,vy:0,slide:Math.random()<.18});
+  for(let i=beads.length-1;i>=0;i--){const b=beads[i];
+    if(b.slide){b.vy=Math.min(b.vy+dt*90,140);b.y+=b.vy*dt;b.x+=Math.sin(b.y*.05)*.3}
+    b.life-=dt*(b.slide?.25:.07)*(I<.05?6:1);if(b.life<=0||b.y>H+10){beads.splice(i,1);continue}
+    const a=clamp(b.life*2);
+    if(b.slide){ctx.strokeStyle=`rgba(220,230,245,${.12*a})`;ctx.lineWidth=b.r*.7;ctx.beginPath();ctx.moveTo(b.x,b.y-b.vy*.35);ctx.lineTo(b.x,b.y);ctx.stroke()}
+    const g=ctx.createRadialGradient(b.x-b.r*.3,b.y-b.r*.4,0,b.x,b.y,b.r);
+    g.addColorStop(0,`rgba(255,255,255,${.55*a})`);g.addColorStop(.45,`rgba(210,222,240,${.12*a})`);g.addColorStop(1,`rgba(0,0,10,${.3*a})`);
+    ctx.fillStyle=g;ctx.beginPath();ctx.arc(b.x,b.y,b.r,0,TAU);ctx.fill();
+  }
+}
+function drawSnow(dt,t,front){
+  const I=env.snow;if(I<.01&&!snow.length)return;
+  if(!front){const want=COUNT(380*I);while(snow.length<want)snow.push({x:rnd(W),y:rnd(-H,H),z:Math.pow(Math.random(),1.5),p:rnd(TAU),sw:rnd(.5,1.4)});if(snow.length>want)snow.length=want}
+  for(const f of snow){
+    const near=f.z>.85;if(near!==front)continue;
+    const r=lerp(.8,front?9:3.4,f.z),v=lerp(25,110,f.z);
+    f.y+=v*dt;f.x+=(Math.sin(t*f.sw+f.p)*16+env.windX*140)*dt*(.4+f.z);
+    if(f.y>H+12){f.y=-12;f.x=rnd(W)}if(f.x>W+12)f.x=-12;if(f.x<-12)f.x=W+12;
+    ctx.globalAlpha=lerp(.45,front?.55:.95,f.z);
+    if(front||r>2.2)ctx.drawImage(blob,f.x-r*1.6,f.y-r*1.6,r*3.2,r*3.2);
+    else{ctx.fillStyle='#f6f9ff';ctx.beginPath();ctx.arc(f.x,f.y,r,0,TAU);ctx.fill()}
+  }
+  ctx.globalAlpha=1;
+}
+function makeBolt(){
+  const x0=rnd(W*.08,W*.92);let x=x0,y=H*rnd(.05,.18);const pts=[[x,y]],end=H*rnd(.6,1.05),br=[];
+  while(y<end){y+=rnd(10,30);x+=rnd(-22,22)+(x0-x)*.04;pts.push([x,y])}
+  for(let i=3;i<pts.length-3;i++)if(Math.random()<.18){let[bx,by]=pts[i];const b=[[bx,by]],d=Math.random()<.5?-1:1;for(let j=0;j<rnd(4,10);j++){bx+=d*rnd(6,22);by+=rnd(8,22);b.push([bx,by])}br.push(b)}
+  return{pts,br,x:x0,ground:Math.random()<.6};
+}
+function drawStorm(dt){
+  if(env.storm>.5){nextBolt-=dt;if(nextBolt<=0){
+    const ground=Math.random()<.55;bolt=ground?makeBolt():null;flashX=bolt?bolt.x/W:rnd(.1,.9);
+    flash=ground?1:rnd(.35,.7);startle=Math.max(startle,ground?1:.4);
+    thunder.push({at:rnd(.5,2.4),power:ground?1:.5});nextBolt=rnd(4,12)*(Math.random()<.3?.12:1)}}
+  for(let i=thunder.length-1;i>=0;i--){thunder[i].at-=dt;if(thunder[i].at<=0){if(!REDUCE)shake=Math.max(shake,thunder[i].power);thunder.splice(i,1)}}
+  if(flash>.02){
+    // the cloud lights up from inside
+    ctx.save();ctx.globalCompositeOperation='lighter';
+    const g=ctx.createRadialGradient(W*flashX,H*.15,0,W*flashX,H*.15,Math.max(W,H)*.7);
+    g.addColorStop(0,`rgba(200,200,255,${.5*flash})`);g.addColorStop(1,'rgba(200,200,255,0)');ctx.fillStyle=g;ctx.fillRect(0,0,W,H);ctx.restore();
+  }
+  if(bolt&&flash>.08){
+    const line=p=>{ctx.beginPath();p.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));ctx.stroke()};
+    ctx.save();ctx.lineJoin='round';ctx.lineCap='round';
+    ctx.strokeStyle=`rgba(190,180,255,${.35*flash})`;ctx.lineWidth=9;line(bolt.pts);
+    ctx.strokeStyle=`rgba(250,248,255,${flash})`;ctx.lineWidth=2.4;line(bolt.pts);ctx.lineWidth=1.1;bolt.br.forEach(line);ctx.restore();
+  }
+}
+
+/* =============== the head & eyes (eyes live on a turning sphere) =============== */
+let cy_=1,sy_=0,cp_=1,sp_=0;
+function proj(lon,lat){
+  const R=head.R,cl=Math.cos(lat),x=R*cl*Math.sin(lon),y=R*Math.sin(lat),z=R*cl*Math.cos(lon);
+  const x2=x*cy_+z*sy_,z2=-x*sy_+z*cy_,y2=y*cp_+z2*sp_;
+  return[head.x+x2,head.y+y2];
+}
+function polyLocal(pts){ctx.beginPath();pts.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));ctx.closePath()}
+const EYE={lon:.455,lat:-.06,ax:.43,ay:.5};
+function eyePt(side,u,w){const lat=EYE.lat+w;return proj(side*EYE.lon+u/Math.cos(lat),lat)}
+function shapePts(shape,r){
+  const N=44,P=[];
+  const ell=(a,b)=>{for(let i=0;i<N;i++){const t=i/N*TAU;P.push([Math.cos(t)*a,Math.sin(t)*b])}};
+  switch(shape){
+    case'slit':ell(r*.32,r*1.85);break;case'pin':ell(r*.3,r*.3);break;case'wide':ell(r*1.22,r*1.6);break;
+    case'diamond':for(let i=0;i<N;i++){const t=i/N*TAU,c=Math.cos(t),s=Math.sin(t),k=1/(Math.abs(c)/.85+Math.abs(s)/1.25);P.push([c*k*r,s*k*r])}break;
+    default:ell(r,r);
+  }
+  return P;
+}
+function eyeColours(cw,side,t){
+  let s=side<0?cw.sL:cw.sR,p=side<0?cw.pL:cw.pR;
+  if(cw.special==='prism'){const h=(t*40+(side<0?0:50))%360;s=hsl(h,90,62);p=hsl((h+180)%360,80,22)}
+  return[s,p];
+}
+function drawHead(t,dt,tx,ty,o){
+  const cw=head.cw,R=head.R;
+  // where to point the face
+  const Zv=S*.95,dx=tx-head.x,dy=ty-head.y;
+  const yawT=clamp(Math.atan2(dx,Zv)*1.15,-.6,.6),pitchT=clamp(Math.atan2(dy,Zv)*1.1,-.5,.5);
+  const f=1-Math.pow(1-clamp(act.follow*(1+startle*2)),dt*60);
+  head.yaw=lerp(head.yaw,yawT,f);head.pitch=lerp(head.pitch,pitchT,f);
+  const d=Math.hypot(dx,dy)||1,k=clamp(d/(S*.5));
+  head.lx=lerp(head.lx,dx/d*k,f*1.3);head.ly=lerp(head.ly,dy/d*k,f*1.3);
+  const sw=Math.sin(t*.7)*.012*env.wind;
+  cy_=Math.cos(head.yaw+sw);sy_=Math.sin(head.yaw+sw);cp_=Math.cos(head.pitch);sp_=Math.sin(head.pitch);
+  const hx=head.x,hy=head.y,pop=1+.12*head.pop*Math.sin(head.pop*Math.PI);
+  ctx.save();ctx.translate(hx,hy);ctx.scale(pop,pop);ctx.translate(-hx,-hy);
+
+  // soft contact shadow + silhouette
+  const sh=ctx.createRadialGradient(hx,hy+R*.06,R*.9,hx,hy+R*.06,R*1.25);sh.addColorStop(0,'rgba(0,0,0,.35)');sh.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=sh;ctx.beginPath();ctx.arc(hx,hy+R*.06,R*1.25,0,TAU);ctx.fill();
+  ctx.fillStyle='#030304';ctx.beginPath();ctx.arc(hx,hy,R,0,TAU);ctx.fill();
+  // faint rim light from the sky
+  const rim=ctx.createRadialGradient(hx,hy,R*.93,hx,hy,R);rim.addColorStop(0,'rgba(0,0,0,0)');rim.addColorStop(1,rgba(mix(env.sky[1],[255,255,255],.2),.22));
+  ctx.fillStyle=rim;ctx.beginPath();ctx.arc(hx,hy,R,0,TAU);ctx.fill();
+  // wet sheen when raining
+  if(env.rain>.1){ctx.fillStyle=`rgba(220,230,250,${.07*clamp(env.rain)})`;ctx.beginPath();ctx.ellipse(hx-R*.35,hy-R*.55,R*.32,R*.12,-.6,0,TAU);ctx.fill()}
+
+  if(cw){
+    ctx.save();ctx.beginPath();ctx.arc(hx,hy,R*.995,0,TAU);ctx.clip(); // eyes never poke past the head
+    // squinting is reserved for really harsh weather: strong wind or near-freezing
+    const strain=wx?Math.max(clamp(((wx.wind||0)-45)/25),wx.temp!=null?clamp((3-wx.temp)/6):0):0;
+    for(const side of[-1,1]){
+      const[scl,pup]=eyeColours(cw,side,t);
+      const P=(u,w)=>eyePt(side,u,w*o); // blinks squash the eye itself
+      const outline=[];for(let i=0;i<64;i++){const a=i/64*TAU,c=Math.cos(a),s=Math.sin(a);
+        // a soft egg: a touch fuller on top and towards the outside
+        const u0=c*EYE.ax*(1-.05*s),w0=s*EYE.ay,lean=-side*.07; // fuller on top, tops lean slightly outward
+        outline.push(P(u0*Math.cos(lean)-w0*Math.sin(lean),u0*Math.sin(lean)+w0*Math.cos(lean)))}
+      ctx.save();polyLocal(outline);
+      if(env.elev<-.05||cw.special==='void'){ctx.shadowColor=rgba(scl,.55);ctx.shadowBlur=R*.1}
+      ctx.fillStyle=rgba(scl);ctx.fill();ctx.shadowBlur=0;ctx.clip();
+      if(cw.special==='galaxy'){ctx.fillStyle='#fff';for(const g of galaxy){const[x,y]=P(g.u*EYE.ax,g.w*EYE.ay);ctx.globalAlpha=.4+.5*Math.sin(t*2+g.p);ctx.beginPath();ctx.arc(x,y,R*g.r,0,TAU);ctx.fill()}ctx.globalAlpha=1}
+      const pr=EYE.ax*.42*head.pupil;
+      const pu=head.lx*EYE.ax*.45,pw=head.ly*EYE.ay*.38;
+      if(dizzy>0){
+        const sp=[];for(let i=0;i<=90;i++){const a=i/90*TAU*2.6+t*10*side,rr=i/90*pr*1.6;sp.push(P(pu+Math.cos(a)*rr,pw+Math.sin(a)*rr))}
+        ctx.strokeStyle=rgba(pup);ctx.lineWidth=R*.028;ctx.lineCap='round';ctx.beginPath();sp.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));ctx.stroke();
+      }else{
+        if(cw.special==='void'){ctx.shadowColor='#fff';ctx.shadowBlur=R*.08}
+        ctx.fillStyle=rgba(pup);
+        polyLocal(shapePts(cw.shape,pr).map(([u,w])=>P(pu+u,pw+w)));
+        if(cw.shape==='ring'){shapePts('round',pr*.55).reverse().forEach(([u,w],i)=>{const[x,y]=P(pu+u,pw+w);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.closePath()}
+        ctx.fill('evenodd');ctx.shadowBlur=0;
+      }
+      if(strain>.02){
+        ctx.fillStyle='#030304';
+        const top=[],bot=[];
+        for(let i=0;i<=20;i++){const u=lerp(-EYE.ax*1.25,EYE.ax*1.25,i/20),bow=1-(u/EYE.ax)**2;
+          top.push(P(u,-EYE.ay*1.2+strain*EYE.ay*.75+bow*EYE.ay*.1*strain));
+          bot.push(P(u,EYE.ay*1.2-strain*EYE.ay*.45-bow*EYE.ay*.06*strain))}
+        polyLocal([...top,P(EYE.ax*1.25,-EYE.ay*1.4),P(-EYE.ax*1.25,-EYE.ay*1.4)]);ctx.fill();
+        polyLocal([...bot,P(EYE.ax*1.25,EYE.ay*1.4),P(-EYE.ax*1.25,EYE.ay*1.4)]);ctx.fill();
+      }
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+  // snow settling on top
+  if(snowPile>.02){ctx.fillStyle='#f4f7fc';for(let i=0;i<14;i++){const a=-Math.PI*(.18+i*.046),rr=R*.07*snowPile*(.75+.25*Math.sin(i*2.1));
+    ctx.beginPath();ctx.ellipse(hx+Math.cos(a)*R*.98,hy+Math.sin(a)*R*.98-rr*.25,rr*1.6,rr,a+Math.PI/2,0,TAU);ctx.fill()}}
+  ctx.restore();
+}
+
+/* =============== loop =============== */
+let lastT=performance.now(),skip=false,paintTimer=0;
+function frame(now){
+  requestAnimationFrame(frame);if(document.hidden)return;
+  const idle=(now-mouse.last)/1000;
+  if(idle>6&&env.rain<.05&&env.snow<.05&&env.storm<.1){skip=!skip;if(skip)return}
+  const dt=Math.min(.05,(now-lastT)/1000);lastT=now;const t=now/1000;
+  stepEnv(dt);
+  paintTimer-=dt;if(paintTimer<=0){paintClouds();paintTimer=.5}
+  mouse.speed*=Math.exp(-dt*4);
+  dizzyMeter=clamp(dizzyMeter+(mouse.speed>2600?dt*.9:-dt*.5),0,1.2);if(dizzyMeter>1&&dizzy<=0){dizzy=2.6;dizzyMeter=0}dizzy=Math.max(0,dizzy-dt);
+  startle=Math.max(0,startle-dt*1.4);squint=Math.max(0,squint-dt*2.5);flash=Math.max(0,flash-dt*3.2);shake=Math.max(0,shake-dt*2.2);
+  head.pop=Math.max(0,head.pop-dt*2.2);
+  snowPile=clamp(snowPile+(env.snow>.4?dt*.01:-dt*.2));
+  sleep=idle>90?clamp(sleep+dt*.12):Math.max(0,sleep-dt*2);
+
+  let tx=mouse.x,ty=mouse.y;
+  if(idle>20&&sleep<.2){if(now>wander.next){wander.x=rnd(W*.1,W*.9);wander.y=rnd(H*.15,H*.85);wander.next=now+rnd(1400,3800)}tx=wander.x;ty=wander.y}
+  const s=sunPos(),sunVis=clamp(1-env.cloud*.92)*sstep(0,.1,env.elev),near=sunVis*clamp(1-Math.hypot(mouse.x-s.x,mouse.y-s.y)/(S*.35));sunNear=near;
+
+  head.R=S*.27;head.x=W/2;head.y=H*.47;
+
+  ctx.save();if(shake>0)ctx.translate(rnd(-1,1)*7*shake,rnd(-1,1)*5*shake);
+  drawSky();drawStars(t,dt);drawMoon();drawSun();
+  drawCloudLayer(LAYERS[0],t,0);
+  if(env.storm>.02||flash>0)drawStorm(dt);
+  drawCloudLayer(LAYERS[1],t,1);
+  drawRain(dt,false);drawSnow(dt,t,false);
+
+  if(head.blinkT<0){head.nextBlink-=dt;if(head.nextBlink<=0&&sleep<.5){head.blinkT=0;head.nextBlink=rnd(.6,1.4)*act.blink*(Math.random()<.18?.08:1)}}
+  let b=0;if(head.blinkT>=0){head.blinkT+=dt/.15;b=Math.sin(Math.PI*clamp(head.blinkT));if(head.blinkT>=1)head.blinkT=-1}
+  let o=(1-b)*(1-sleep*.94)*(1-squint*.3)*(1+startle*.05+flash*.05);o=clamp(o,.04,1.06);
+  const pt=act.pupil*(1-near*.45)*(1-flash*.5)*(1+startle*.2);
+  head.pupil=lerp(head.pupil,clamp(pt,.45,1.6),1-Math.exp(-dt*(flash>.2?20:3)));
+  const shv=act.shiver*(REDUCE?0:1);
+  if(shv>0){head.x+=Math.sin(t*47)*S*.0012*shv;head.y+=Math.cos(t*53)*S*.0009*shv}
+  drawHead(t,dt,tx,ty,o);
+
+  if(sleep>.6&&Math.random()<dt*1.1)zzz.push({x:head.x+head.R*.75,y:head.y-head.R*.8,life:1,s:rnd(.8,1.3)});
+  for(let i=zzz.length-1;i>=0;i--){const z=zzz[i];z.life-=dt*.33;z.y-=28*dt;z.x+=Math.sin(z.life*6)*12*dt;if(z.life<=0){zzz.splice(i,1);continue}
+    ctx.fillStyle=`rgba(255,255,255,${clamp(z.life*1.4)*.85})`;ctx.font=`700 ${head.R*.2*z.s*(1.4-z.life*.4)}px Sora, system-ui, sans-serif`;ctx.fillText('z',z.x,z.y)}
+
+  drawRain(dt,true);drawSnow(dt,t,true);drawFog(t);drawBeads(dt);
+  ctx.restore();
+}
+
+addEventListener('resize',resize);
+resize();
+const sv=savedRoll();if(sv){head.cw=sv}else reroll();
+buildWx();
+// start the scene already at its target instead of fading in from black
+Object.assign(env,{...envT,sky:envT.sky.map(c=>c.slice())});Object.assign(act,actT);
+paintClouds();renderHud();loadWeather();
+setInterval(loadWeather,10*60e3);
+setInterval(buildWx,60e3);
+setInterval(()=>{if(!savedRoll())reroll()},60e3); // a new face once every 24 hours
+requestAnimationFrame(frame);
+})();
+</script>

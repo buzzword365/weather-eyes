@@ -1,0 +1,20 @@
+# Personal settings and secrets
+config.js
+config.local.js
+.env
+.env.*
+!.env.example
+
+# Build outputs
+Weather Eyes.app/
+.build/
+DerivedData/
+*.dSYM/
+
+# macOS, editors and local logs
+.DS_Store
+._*
+*.log
+.vscode/
+.idea/
+*.xcuserstate
